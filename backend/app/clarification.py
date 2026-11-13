@@ -20,7 +20,9 @@ def analyze_request(text: str, schema: list[dict[str, Any]], prior_intent: dict[
     elif ranking and not intent.get("metric"):
         intent["operation"] = "ranking"
         numeric_hint = next((name for name in columns if any(word in name for word in ("revenue", "fare", "amount", "price", "count", "order"))), None)
-        intent["missing"] = ["metric"] if not numeric_hint else []
+        intent["missing"] = [] if has_metric else ["metric"]
+        if not any(year in normalized for year in ("2024", "2025", "2026")) and "time_range" not in intent["missing"]:
+            intent["missing"].append("time_range")
         if not numeric_hint:
             intent["metric_options"] = [name for name in columns if name not in {"id", "customer_id"}][:5]
     elif "revenue" in normalized or "sales" in normalized:

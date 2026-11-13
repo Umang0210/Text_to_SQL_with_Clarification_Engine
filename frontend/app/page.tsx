@@ -1,42 +1,109 @@
 "use client";
 
-import { FormEvent, useState } from "react";
+import { ChangeEvent, FormEvent, useEffect, useRef, useState } from "react";
 
 const API = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000";
+type Dataset = { id: string; name: string; filename: string; size_bytes: number; tables: { table: string; columns: { name: string }[]; row_count: number }[]; preview: Record<string, unknown>[]; duplicate_rows: number };
+type Question = { id: string; question: string; options: string[] };
+type Result = { status: string; message?: string; questions?: Question[]; sql?: string; columns?: string[]; rows?: Record<string, unknown>[]; explanation?: string; dataset_name?: string; validation_status?: string };
 
-type Result = { status: string; message: string; questions?: { id: string; question: string; options: string[] }[]; sql?: string; rows?: Record<string, unknown>[]; explanation?: string; conversation_id?: string };
+async function request(path: string, init?: RequestInit) {
+  const response = await fetch(`${API}${path}`, init);
+  const body = await response.json().catch(() => ({ detail: "The server returned an invalid response." }));
+  if (!response.ok) throw new Error(typeof body.detail === "string" ? body.detail : JSON.stringify(body.detail));
+  return body;
+}
 
 export default function Home() {
-  const [connectionId, setConnectionId] = useState("");
+  const [datasets, setDatasets] = useState<Dataset[]>([]);
+  const [active, setActive] = useState<Dataset | null>(null);
   const [conversationId, setConversationId] = useState("");
   const [prompt, setPrompt] = useState("");
   const [result, setResult] = useState<Result | null>(null);
   const [busy, setBusy] = useState(false);
+  const [uploading, setUploading] = useState(false);
+  const [error, setError] = useState("");
+  const fileInput = useRef<HTMLInputElement>(null);
 
-  async function start() {
-    const connection = await fetch(`${API}/connections`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ name: "Demo SQLite", url: "sqlite:///querymind.db" }) }).then((response) => response.json());
-    setConnectionId(connection.id);
-    const conversation = await fetch(`${API}/conversations?connection_id=${connection.id}`, { method: "POST" }).then((response) => response.json());
-    setConversationId(conversation.id);
+  useEffect(() => {
+    request("/datasets").then((items: Dataset[]) => { setDatasets(items); setActive(items[0] ?? null); }).catch(() => undefined);
+  }, []);
+
+  async function upload(file: File) {
+    setError("");
+    const allowed = [".csv", ".xlsx", ".xls", ".json", ".db", ".sqlite", ".sqlite3"];
+    if (!allowed.some((extension) => file.name.toLowerCase().endsWith(extension))) { setError("Choose a CSV, Excel, JSON, or SQLite file."); return; }
+    if (file.size > 50 * 1024 * 1024) { setError("Files must be 50 MB or smaller."); return; }
+    setUploading(true);
+    try {
+      const form = new FormData();
+      form.append("file", file);
+      const dataset = await request("/datasets/upload", { method: "POST", body: form });
+      setDatasets((current) => [dataset, ...current.filter((item) => item.id !== dataset.id)]);
+      setActive(dataset);
+      setConversationId("");
+      setResult(null);
+    } catch (uploadError) { setError(uploadError instanceof Error ? uploadError.message : "Upload failed."); }
+    finally { setUploading(false); }
   }
 
-  async function ask(event: FormEvent) {
+  function onFile(event: ChangeEvent<HTMLInputElement>) {
+    const file = event.target.files?.[0];
+    if (file) void upload(file);
+    event.target.value = "";
+  }
+
+  async function activate(dataset: Dataset) {
+    try { const selected = await request(`/datasets/${dataset.id}/activate`, { method: "POST" }); setActive(selected); setConversationId(""); setResult(null); }
+    catch (activationError) { setError(activationError instanceof Error ? activationError.message : "Could not activate dataset."); }
+  }
+
+  async function runAnalysis(event: FormEvent) {
     event.preventDefault();
-    if (!conversationId) await start();
-    setBusy(true);
-    const id = conversationId || (await fetch(`${API}/connections`).then((response) => response.json()))[0]?.id;
-    if (!id) { setBusy(false); return; }
-    const conversations = conversationId ? conversationId : await fetch(`${API}/conversations?connection_id=${id}`, { method: "POST" }).then((response) => response.json()).then((value) => value.id);
-    setConversationId(conversations);
-    const response = await fetch(`${API}/conversations/${conversations}/messages`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ content: prompt }) });
-    setResult(await response.json());
-    setBusy(false);
+    if (!active) { setError("Upload or select a dataset before running analysis."); return; }
+    setBusy(true); setError("");
+    try {
+      let id = conversationId;
+      if (!id) { const conversation = await request(`/conversations?connection_id=${active.id}`, { method: "POST" }); id = conversation.id; setConversationId(id); }
+      setResult(await request(`/conversations/${id}/messages`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ content: prompt }) }));
+    } catch (runError) { setError(runError instanceof Error ? runError.message : "Analysis failed."); }
+    finally { setBusy(false); }
   }
 
-  async function answer(id: string, value: string) {
-    const response = await fetch(`${API}/conversations/${conversationId}/clarifications`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ [id]: value }) });
-    setResult(await response.json());
+  async function answer(questionId: string, value: string) {
+    if (!conversationId) return;
+    setBusy(true); setError("");
+    try { setResult(await request(`/conversations/${conversationId}/clarifications`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ [questionId]: value }) })); }
+    catch (answerError) { setError(answerError instanceof Error ? answerError.message : "Could not apply clarification."); }
+    finally { setBusy(false); }
   }
 
-  return <main><aside><div className="brand">QueryMind</div><p>Conversational database intelligence</p><button onClick={start}>New workspace</button><span>{connectionId ? "Demo connection ready" : "No connection selected"}</span></aside><section><header><div><small>AI WORKSPACE</small><h1>Ask your database</h1></div><div className="status">● Local engine</div></header><div className="panel"><div className="intro">Describe the analysis you need. QueryMind will ask only for information that materially changes the result.</div><form onSubmit={ask}><textarea value={prompt} onChange={(event) => setPrompt(event.target.value)} placeholder="Show me the top customers..." /><button disabled={busy || !prompt}>{busy ? "Working..." : "Run analysis"}</button></form></div>{result && <div className="panel"><h2>{result.message}</h2>{result.questions?.map((question) => <div className="question" key={question.id}><strong>{question.question}</strong><div>{question.options.map((option) => <button key={option} onClick={() => answer(question.id, option)}>{option}</button>)}</div></div>)}{result.sql && <><h3>Generated SQL</h3><pre>{result.sql}</pre><p>{result.explanation}</p><table><tbody>{result.rows?.map((row, index) => <tr key={index}>{Object.values(row).map((value, cell) => <td key={cell}>{String(value)}</td>)}</tr>)}</tbody></table></>}</div>}</section></main>;
+  return <main>
+    <aside>
+      <div className="brand">QueryMind</div><p>Conversational database intelligence</p>
+      <button onClick={() => { setConversationId(""); setResult(null); setPrompt(""); }}>+ New Workspace</button>
+      <nav><b>AI Workspace</b><span>Data Sources</span><span>Database Explorer</span><span>Query History</span><span>Analytics Dashboard</span><span>Settings</span></nav>
+      <div className="sources"><div className="source-heading"><b>Data Sources</b><span>{datasets.length}</span></div>
+        <button className="upload" onClick={() => fileInput.current?.click()}>{uploading ? "Uploading..." : "Upload dataset"}</button>
+        <input ref={fileInput} hidden type="file" accept=".csv,.xlsx,.xls,.json,.db,.sqlite,.sqlite3" onChange={onFile} />
+        {datasets.map((dataset) => <button className={`dataset ${active?.id === dataset.id ? "selected" : ""}`} key={dataset.id} onClick={() => void activate(dataset)}><strong>{dataset.name}</strong><small>{(dataset.size_bytes / 1024).toFixed(1)} KB · {dataset.tables.length} table(s)</small></button>)}
+      </div>
+    </aside>
+    <section>
+      <header><div><small>AI WORKSPACE</small><h1>Ask your data</h1></div><div className="status">{active ? `● ${active.name}` : "○ No dataset"}</div></header>
+      {!active && <div className="empty panel"><h2>Start with a data source</h2><p>Upload a CSV, Excel, JSON, or SQLite dataset from the sidebar, then ask a question in natural language.</p><button onClick={() => fileInput.current?.click()}>Choose dataset</button></div>}
+      {active && <><div className="active-dataset panel"><div><small>ACTIVE DATASET</small><strong>{active.name}</strong><span>{active.tables.map((table) => `${table.table} (${table.row_count} rows)`).join(" · ")}</span></div><button onClick={() => fileInput.current?.click()}>Add another</button></div>
+        <div className="panel"><div className="intro">Querying <b>{active.name}</b>. Ask for counts, rankings, trends, averages, or filtered records.</div><form onSubmit={runAnalysis}><textarea value={prompt} onChange={(event) => setPrompt(event.target.value)} placeholder="Show the top five customers by number of bookings..." /><button disabled={busy || !prompt.trim()}>{busy ? "Running..." : "Run Analysis"}</button></form></div></>}
+      {error && <div className="error">{error}</div>}
+      {result && <ResultPanel result={result} answer={answer} />}
+    </section>
+  </main>;
+}
+
+function ResultPanel({ result, answer }: { result: Result; answer: (id: string, value: string) => void }) {
+  const columns = result.columns ?? (result.rows?.[0] ? Object.keys(result.rows[0]) : []);
+  return <div className="panel result"><h2>{result.message}</h2>
+    {result.questions?.map((question) => <div className="question" key={question.id}><strong>{question.question}</strong><div>{question.options.map((option) => <button key={option} onClick={() => answer(question.id, option)}>{option}</button>)}</div></div>)}
+    {result.sql && <><div className="result-heading"><h3>Generated SQL</h3><button onClick={() => void navigator.clipboard.writeText(result.sql ?? "")}>Copy SQL</button></div><pre>{result.sql}</pre><div className="execution"><span>{result.dataset_name}</span><span>Validation: {result.validation_status}</span><span>{result.rows?.length ?? 0} rows</span></div><p>{result.explanation}</p><table><thead><tr>{columns.map((column) => <th key={column}>{column}</th>)}</tr></thead><tbody>{result.rows?.map((row, index) => <tr key={index}>{columns.map((column) => <td key={column}>{String(row[column] ?? "")}</td>)}</tr>)}</tbody></table></>}
+  </div>;
 }
