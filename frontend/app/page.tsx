@@ -2,15 +2,31 @@
 
 import { ChangeEvent, FormEvent, useEffect, useRef, useState } from "react";
 
-const API = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000";
+const API = process.env.NEXT_PUBLIC_API_URL?.replace(/\/$/, "") ?? "";
 type Dataset = { id: string; connection_id: string; name: string; filename: string; size_bytes: number; tables: { table: string; columns: { name: string }[]; row_count: number }[]; preview: Record<string, unknown>[]; duplicate_rows: number };
 type Question = { id: string; question: string; options: string[] };
 type Result = { status: string; message?: string; questions?: Question[]; sql?: string; columns?: string[]; rows?: Record<string, unknown>[]; explanation?: string; dataset_name?: string; validation_status?: string };
 
 async function request(path: string, init?: RequestInit) {
-  const response = await fetch(`${API}${path}`, init);
+  if (!API) throw new Error("Backend API is not configured. Set NEXT_PUBLIC_API_URL in the Vercel project.");
+  const controller = new AbortController();
+  const timeout = window.setTimeout(() => controller.abort(), 30_000);
+  let response: Response;
+  try {
+    response = await fetch(`${API}${path}`, { ...init, signal: controller.signal });
+  } catch (error) {
+    if (error instanceof DOMException && error.name === "AbortError") {
+      throw new Error(`Backend request timed out: ${API}${path}`);
+    }
+    throw new Error(`Backend unavailable at ${API}. Check the API URL, backend health, and CORS configuration.`);
+  } finally {
+    window.clearTimeout(timeout);
+  }
   const body = await response.json().catch(() => ({ detail: "The server returned an invalid response." }));
-  if (!response.ok) throw new Error(typeof body.detail === "string" ? body.detail : JSON.stringify(body.detail));
+  if (!response.ok) {
+    const detail = typeof body.detail === "string" ? body.detail : JSON.stringify(body.detail);
+    throw new Error(`Backend returned ${response.status}: ${detail}`);
+  }
   return body;
 }
 
@@ -26,7 +42,9 @@ export default function Home() {
   const fileInput = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
-    request("/datasets").then((items: Dataset[]) => { setDatasets(items); setActive(items[0] ?? null); }).catch(() => undefined);
+    request("/datasets").then((items: Dataset[]) => { setDatasets(items); setActive(items[0] ?? null); }).catch((loadError) => {
+      setError(loadError instanceof Error ? loadError.message : "Could not connect to the backend.");
+    });
   }, []);
 
   async function upload(file: File) {
