@@ -57,8 +57,6 @@ Without a key, the deterministic local intent/SQL path remains available for dev
 
 ## Vercel deployment
 
-The Next.js app lives in `frontend/`. The root [`vercel.json`](./vercel.json) directs Vercel to install and build from that directory. In the Vercel project settings, set **Root Directory** to `frontend` when using the standard dashboard flow, or deploy from the repository root using the included configuration. Set `NEXT_PUBLIC_API_URL` to the deployed FastAPI URL; Gemini variables belong only to the backend host.
+The Next.js app lives in `frontend/` and the FastAPI serverless entrypoint is `api/index.py`. The root [`vercel.json`](./vercel.json) builds the frontend while Vercel discovers the Python function. Set the Vercel project **Root Directory** to the repository root (`.`), not `frontend`, so both runtimes are included. `NEXT_PUBLIC_API_URL=/api` keeps browser requests same-origin.
 
-Vercel cannot host the FastAPI process from this Next.js deployment. Deploy `backend/` separately and configure `CORS_ALLOWED_ORIGINS` with the Vercel origin.
-
-The production frontend requires `NEXT_PUBLIC_API_URL` at build time. It intentionally does not fall back to localhost in a deployed browser, because that would make uploads fail with a misleading network error.
+Vercel functions are stateless and ephemeral. The current ingestion implementation uses local SQLite files for development; for production persistence, configure an external PostgreSQL-compatible database and persistent object storage before treating uploaded datasets as durable. Do not rely on Vercel `/tmp` across invocations.

@@ -2,7 +2,7 @@
 
 import { ChangeEvent, FormEvent, useEffect, useRef, useState } from "react";
 
-const API = process.env.NEXT_PUBLIC_API_URL?.replace(/\/$/, "") ?? "";
+const API = (process.env.NEXT_PUBLIC_API_URL ?? "/api").replace(/\/$/, "");
 type Dataset = { id: string; connection_id: string; name: string; filename: string; size_bytes: number; tables: { table: string; columns: { name: string }[]; row_count: number }[]; preview: Record<string, unknown>[]; duplicate_rows: number };
 type Question = { id: string; question: string; options: string[] };
 type Result = { status: string; message?: string; questions?: Question[]; sql?: string; columns?: string[]; rows?: Record<string, unknown>[]; explanation?: string; dataset_name?: string; validation_status?: string };
