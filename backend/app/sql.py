@@ -1,6 +1,8 @@
 import re
 from typing import Any
 
+from .gemini import GeminiUnavailable, gemini
+
 try:
     import sqlglot
     from sqlglot import exp
@@ -36,6 +38,18 @@ def validate_sql(sql: str, schema: list[dict[str, Any]], max_rows: int = 500) ->
 
 
 def generate_sql(intent: dict[str, Any], schema: list[dict[str, Any]]) -> str:
+    if gemini.configured:
+        try:
+            result = gemini.generate_json(
+                "Generate one read-only SQL SELECT statement. Use only tables and columns in the schema. Return JSON with a sql string. Do not explain or invent identifiers.",
+                {"intent": intent, "schema": schema},
+            )
+            sql = result.get("sql")
+            if not isinstance(sql, str) or not sql.strip():
+                raise ValueError("Gemini returned no SQL")
+            return sql
+        except GeminiUnavailable:
+            raise
     tables = {item["table"]: {column["name"] for column in item["columns"]} for item in schema}
     if "orders" in tables:
         if intent.get("operation") == "ranking":

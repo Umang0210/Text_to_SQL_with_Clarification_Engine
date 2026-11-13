@@ -25,3 +25,16 @@ def test_clarification_flow(tmp_path) -> None:
     response = client.post(f"/conversations/{conversation['id']}/clarifications", json={"metric": "Revenue", "time_range": "All time"}).json()
     assert response["status"] == "completed"
     assert response["rows"][0]["revenue"] == 100
+
+
+def test_csv_upload_and_query() -> None:
+    csv_data = b"customer_id,city,booking_status,fare\n1,Delhi,completed,100\n2,Mumbai,cancelled,50\n1,Delhi,completed,80\n"
+    response = client.post("/datasets/upload", files={"file": ("cab_bookings.csv", csv_data, "text/csv")})
+    assert response.status_code == 200
+    dataset = response.json()
+    assert dataset["tables"][0]["row_count"] == 3
+    assert len(dataset["preview"]) == 3
+    connection = client.post("/conversations", params={"connection_id": dataset["connection_id"]}).json()
+    result = client.post(f"/conversations/{connection['id']}/messages", json={"content": "Show the total number of bookings"}).json()
+    assert result["status"] == "completed"
+    assert result["rows"][0]["total_count"] == 3

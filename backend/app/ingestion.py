@@ -7,6 +7,7 @@ from typing import Any
 from uuid import uuid4
 
 from openpyxl import load_workbook
+import xlrd
 
 from .config import settings
 
@@ -15,25 +16,43 @@ ALLOWED_EXTENSIONS = {".csv", ".xlsx", ".xls", ".json", ".db", ".sqlite", ".sqli
 
 def _safe_identifier(value: str, fallback: str = "table") -> str:
     cleaned = re.sub(r"\W+", "_", value.strip().lower()).strip("_")
-    return cleaned or fallback
+    cleaned = cleaned or fallback
+    return f"table_{cleaned}" if cleaned[0].isdigit() else cleaned
 
 
-def _rows_from_csv(path: Path) -> list[tuple[str, list[dict[str, Any]]]]:
+def _rows_from_csv(path: Path, table_name: str) -> list[tuple[str, list[dict[str, Any]]]]:
     with path.open("r", encoding="utf-8-sig", newline="") as stream:
         rows = list(csv.DictReader(stream))
-    return [(_safe_identifier(path.stem), rows)]
+    return [(_safe_identifier(table_name), rows)]
 
 
-def _rows_from_json(path: Path) -> list[tuple[str, list[dict[str, Any]]]]:
+def _rows_from_json(path: Path, table_name: str) -> list[tuple[str, list[dict[str, Any]]]]:
     data = json.loads(path.read_text(encoding="utf-8"))
     if isinstance(data, dict):
         data = next((value for value in data.values() if isinstance(value, list)), [data])
     if not isinstance(data, list) or not all(isinstance(row, dict) for row in data):
         raise ValueError("JSON must contain an object or an array of objects")
-    return [(_safe_identifier(path.stem), data)]
+    return [(_safe_identifier(table_name), data)]
 
 
 def _rows_from_workbook(path: Path, selected_sheets: list[str] | None) -> list[tuple[str, list[dict[str, Any]]]]:
+    if path.suffix.lower() == ".xls":
+        workbook = xlrd.open_workbook(path)
+        names = selected_sheets or workbook.sheet_names()
+        missing = set(names) - set(workbook.sheet_names())
+        if missing:
+            raise ValueError(f"Unknown sheet(s): {', '.join(sorted(missing))}")
+        return [
+            (
+                _safe_identifier(name),
+                [
+                    dict(zip([_safe_identifier(str(value), f"column_{index}") for index, value in enumerate(sheet.row_values(0))], row))
+                    for row in sheet.get_rows()[1:]
+                ],
+            )
+            for name in names
+            for sheet in [workbook.sheet_by_name(name)]
+        ]
     workbook = load_workbook(path, read_only=True, data_only=True)
     names = selected_sheets or workbook.sheetnames
     missing = set(names) - set(workbook.sheetnames)
@@ -71,9 +90,9 @@ def ingest_file(filename: str, content: bytes, selected_sheets: list[str] | None
         rows, source_connection = _inspect_existing(source)
     else:
         if extension == ".csv":
-            rows = _rows_from_csv(source)
+            rows = _rows_from_csv(source, Path(filename).stem)
         elif extension == ".json":
-            rows = _rows_from_json(source)
+            rows = _rows_from_json(source, Path(filename).stem)
         else:
             rows = _rows_from_workbook(source, selected_sheets)
         source_connection = None
@@ -98,6 +117,7 @@ def ingest_file(filename: str, content: bytes, selected_sheets: list[str] | None
 
 
 def _metadata(connection: sqlite3.Connection) -> dict[str, Any]:
+    connection.row_factory = sqlite3.Row
     tables = []
     preview: list[dict[str, Any]] = []
     duplicate_rows = 0
@@ -106,7 +126,9 @@ def _metadata(connection: sqlite3.Connection) -> dict[str, Any]:
         columns = [row[1] for row in connection.execute(f'PRAGMA table_info("{table}")')]
         records = [dict(row) for row in connection.execute(f'SELECT * FROM "{table}" LIMIT 100')]
         count = connection.execute(f'SELECT COUNT(*) FROM "{table}"').fetchone()[0]
-        duplicates = connection.execute(f'SELECT COUNT(*) - COUNT(DISTINCT ({", ".join(f"""\"{c}\"""" for c in columns)})) FROM "{table}"').fetchone()[0] or 0
+        quoted = ", ".join(f'"{column}"' for column in columns)
+        total_distinct = connection.execute(f'SELECT COUNT(*) FROM (SELECT DISTINCT {quoted} FROM "{table}")').fetchone()[0]
+        duplicates = count - total_distinct
         duplicate_rows += max(0, duplicates)
         candidates = [column for column in columns if connection.execute(f'SELECT COUNT(*) FROM "{table}" WHERE "{column}" IS NULL OR "{column}" = ""').fetchone()[0] == 0 and connection.execute(f'SELECT COUNT(DISTINCT "{column}") FROM "{table}"').fetchone()[0] == count]
         tables.append({"table": table, "columns": [{"name": column, "type": "TEXT"} for column in columns], "row_count": count})

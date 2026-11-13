@@ -26,6 +26,7 @@ class QueryRecord:
 @dataclass
 class Dataset:
     id: str
+    connection_id: str
     name: str
     filename: str
     url: str

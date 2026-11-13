@@ -1,7 +1,20 @@
 from typing import Any
 
+from .gemini import GeminiUnavailable, gemini
+
 
 def analyze_request(text: str, schema: list[dict[str, Any]], prior_intent: dict[str, Any] | None = None) -> dict[str, Any]:
+    if gemini.configured:
+        try:
+            result = gemini.generate_json(
+                "Extract intent from the user request. Return JSON with operation, metric, dimensions, filters, time_range, ranking, missing_information. Use only schema identifiers present in the supplied schema.",
+                {"request": text, "schema": schema, "previous_intent": prior_intent or {}},
+            )
+            result["request"] = text
+            result["missing"] = result.pop("missing_information", result.get("missing", []))
+            return result
+        except GeminiUnavailable:
+            raise
     normalized = text.lower()
     intent: dict[str, Any] = dict(prior_intent or {})
     intent["request"] = text
@@ -10,7 +23,9 @@ def analyze_request(text: str, schema: list[dict[str, Any]], prior_intent: dict[
     columns = {column["name"].lower() for table in schema for column in table.get("columns", [])}
     ranking = any(word in normalized for word in ("top", "best", "highest", "leading"))
     has_metric = any(word in normalized for word in ("number of", "count", "bookings", "orders", "revenue", "fare", "profit"))
-    if ranking and "month" in normalized and has_metric and not any(word in normalized for word in ("each month", "per month", "monthly")):
+    if any(phrase in normalized for phrase in ("total number", "total count", "how many", "count of")):
+        intent.update({"operation": "aggregation", "metric": "count", "missing": []})
+    elif ranking and "month" in normalized and has_metric and not any(word in normalized for word in ("each month", "per month", "monthly")):
         intent.update({"operation": "ranking", "metric": "count", "missing": ["ranking_scope"]})
         intent["ranking_scope_options"] = [
             "The top customer for each month",
@@ -39,6 +54,17 @@ def analyze_request(text: str, schema: list[dict[str, Any]], prior_intent: dict[
 
 
 def questions_for(intent: dict[str, Any]) -> list[dict[str, Any]]:
+    if gemini.configured and intent.get("missing"):
+        try:
+            result = gemini.generate_json(
+                "Create only the necessary contextual clarification questions. Return JSON with questions, an array of objects containing id, question, kind, and options. Do not ask for information already present in intent.",
+                {"intent": intent},
+            )
+            questions = result.get("questions", [])
+            if isinstance(questions, list):
+                return [question for question in questions if isinstance(question, dict) and question.get("id") and question.get("question")]
+        except GeminiUnavailable:
+            raise
     questions: list[dict[str, Any]] = []
     if "metric" in intent.get("missing", []):
         questions.append({"id": "metric", "question": "How should the results be ranked?", "kind": "single_choice", "options": ["Revenue", "Number of orders", "Profit"]})

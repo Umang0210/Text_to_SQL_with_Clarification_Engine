@@ -17,6 +17,7 @@ class ConnectionResponse(BaseModel):
 
 class DatasetResponse(BaseModel):
     id: str
+    connection_id: str
     name: str
     filename: str
     size_bytes: int

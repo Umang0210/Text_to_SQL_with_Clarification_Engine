@@ -44,4 +44,19 @@ The included demo connection uses SQLite so the vertical slice works without ext
 - Query history and result interpretation.
 - Next.js workspace for chat, SQL preview, and tabular results.
 
-External LLM providers can be added behind `LLMProvider`; no API keys are required for the local fallback.
+## Gemini configuration
+
+Gemini is the primary provider when `GEMINI_API_KEY` is set. The backend keeps the key server-side and uses the same service for intent extraction, clarification, SQL generation, and result interpretation.
+
+```powershell
+$env:GEMINI_API_KEY="your_gemini_api_key"
+$env:GEMINI_MODEL="gemini-2.5-flash"
+```
+
+Without a key, the deterministic local intent/SQL path remains available for development and tests. When a key is configured but Gemini is unavailable, the API returns an explicit `503` rather than claiming that an AI operation succeeded.
+
+## Vercel deployment
+
+The Next.js app lives in `frontend/`. The root [`vercel.json`](./vercel.json) directs Vercel to install and build from that directory. In the Vercel project settings, set **Root Directory** to `frontend` when using the standard dashboard flow, or deploy from the repository root using the included configuration. Set `NEXT_PUBLIC_API_URL` to the deployed FastAPI URL; Gemini variables belong only to the backend host.
+
+Vercel cannot host the FastAPI process from this Next.js deployment. Deploy `backend/` separately and configure `CORS_ALLOWED_ORIGINS` with the Vercel origin.

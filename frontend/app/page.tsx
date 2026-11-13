@@ -3,7 +3,7 @@
 import { ChangeEvent, FormEvent, useEffect, useRef, useState } from "react";
 
 const API = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000";
-type Dataset = { id: string; name: string; filename: string; size_bytes: number; tables: { table: string; columns: { name: string }[]; row_count: number }[]; preview: Record<string, unknown>[]; duplicate_rows: number };
+type Dataset = { id: string; connection_id: string; name: string; filename: string; size_bytes: number; tables: { table: string; columns: { name: string }[]; row_count: number }[]; preview: Record<string, unknown>[]; duplicate_rows: number };
 type Question = { id: string; question: string; options: string[] };
 type Result = { status: string; message?: string; questions?: Question[]; sql?: string; columns?: string[]; rows?: Record<string, unknown>[]; explanation?: string; dataset_name?: string; validation_status?: string };
 
@@ -64,7 +64,7 @@ export default function Home() {
     setBusy(true); setError("");
     try {
       let id = conversationId;
-      if (!id) { const conversation = await request(`/conversations?connection_id=${active.id}`, { method: "POST" }); id = conversation.id; setConversationId(id); }
+      if (!id) { const conversation = await request(`/conversations?connection_id=${active.connection_id}`, { method: "POST" }); id = conversation.id; setConversationId(id); }
       setResult(await request(`/conversations/${id}/messages`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ content: prompt }) }));
     } catch (runError) { setError(runError instanceof Error ? runError.message : "Analysis failed."); }
     finally { setBusy(false); }
