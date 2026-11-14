@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { clarify, explain, generateSql, understandIntent } from "./ai";
 import { getConversation, getDatasetByConnection, saveConversation, saveQuery, sql } from "./db";
+import type { Dataset, SchemaTable } from "./types";
 
 const queryDeadlineMs = Number(process.env.QUERY_DEADLINE_MS ?? 25_000);
 
@@ -27,8 +28,59 @@ async function runStage<T>(stage: string, operation: () => Promise<T>, deadline:
   }
 }
 
+function isTextType(type: string) {
+  return /^(text|varchar|character varying|char|character|citext)/i.test(type.trim());
+}
+
+function columnName(expression: string) {
+  const identifier = expression.trim().replace(/^.*\./, "").replace(/^"|"$/g, "");
+  return identifier.toLowerCase();
+}
+
+function textColumns(dataset: Dataset) {
+  return new Set(dataset.tables.flatMap((table) => table.columns.filter((column) => isTextType(column.type)).map((column) => column.name.toLowerCase())));
+}
+
+export function normalizeCaseInsensitiveTextComparisons(query: string, dataset: Dataset) {
+  const columns = textColumns(dataset);
+  const isTextColumn = (expression: string) => columns.has(columnName(expression)) && !/^\s*lower\s*\(/i.test(expression);
+  let normalized = query;
+
+  normalized = normalized.replace(
+    /(\b(?:(?:[a-z_]\w*)\.)?(?:"[^"]+"|[a-z_]\w*))\s*(=|<>|!=|LIKE|NOT\s+LIKE)\s*('(?:''|[^'])*')/gi,
+    (match, left: string, operator: string, literal: string) => {
+      if (!isTextColumn(left)) return match;
+      const caseInsensitiveOperator = operator.replace(/\s+/g, " ").toUpperCase().replace("LIKE", "ILIKE");
+      if (caseInsensitiveOperator === "=" || caseInsensitiveOperator === "<>" || caseInsensitiveOperator === "!=") {
+        return `LOWER(${left}) ${caseInsensitiveOperator} LOWER(${literal})`;
+      }
+      return `${left} ${caseInsensitiveOperator} ${literal}`;
+    },
+  );
+
+  normalized = normalized.replace(
+    /('(?:''|[^'])*')\s*(=|<>|!=|LIKE|NOT\s+LIKE)\s*(\b(?:(?:[a-z_]\w*)\.)?(?:"[^"]+"|[a-z_]\w*))/gi,
+    (match, literal: string, operator: string, right: string) => {
+      if (!isTextColumn(right)) return match;
+      const caseInsensitiveOperator = operator.replace(/\s+/g, " ").toUpperCase().replace("LIKE", "ILIKE");
+      if (caseInsensitiveOperator === "=" || caseInsensitiveOperator === "<>" || caseInsensitiveOperator === "!=") {
+        return `LOWER(${literal}) ${caseInsensitiveOperator} LOWER(${right})`;
+      }
+      return `${literal} ${caseInsensitiveOperator} ${right}`;
+    },
+  );
+
+  normalized = normalized.replace(
+    /(\b(?:(?:[a-z_]\w*)\.)?(?:"[^"]+"|[a-z_]\w*))\s*=\s*(\b(?:(?:[a-z_]\w*)\.)?(?:"[^"]+"|[a-z_]\w*))/gi,
+    (match, left: string, right: string) => isTextColumn(left) && isTextColumn(right)
+      ? `LOWER(${left}) = LOWER(${right})`
+      : match,
+  );
+  return normalized;
+}
+
 function validateQuery(query: string, dataset: Awaited<ReturnType<typeof getDatasetByConnection>>) {
-  const normalized = query.trim().replace(/;+\s*$/, "");
+  const normalized = normalizeCaseInsensitiveTextComparisons(query.trim().replace(/;+\s*$/, ""), dataset as Dataset);
   if (!/^select\b/i.test(normalized) || /\b(insert|update|delete|drop|alter|truncate|grant|revoke)\b/i.test(normalized)) throw new Error("Only read-only SELECT queries are allowed.");
   if (!dataset) throw new Error("Query does not reference the active dataset schema.");
   const referencedTables = [...normalized.matchAll(/\b(?:from|join)\s+([a-zA-Z_][\w]*)/gi)].map((match) => match[1].toLowerCase());

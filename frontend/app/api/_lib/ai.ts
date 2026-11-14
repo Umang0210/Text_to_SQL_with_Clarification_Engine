@@ -62,7 +62,7 @@ export async function clarify(intent: Intent, schema: SchemaTable[], requestId?:
 
 export async function generateSql(intent: Intent, schema: SchemaTable[], requestId?: string) {
   const result = await jsonPrompt(
-    "Generate JSON {sql}. SQL must be one read-only PostgreSQL SELECT statement using only the supplied tables and columns. Never invent identifiers.",
+    "Generate JSON {sql}. SQL must be one read-only PostgreSQL SELECT statement using only the supplied tables and columns. For text equality use LOWER(column) = LOWER('value'); for text pattern matching use ILIKE. Apply this to WHERE, HAVING, AND/OR filters, and text JOIN comparisons. Do not lower numeric, date, boolean, NULL, or other non-text values. Never invent identifiers.",
     { intent, schema },
     aiTimeoutMs,
     requestId,

@@ -2,6 +2,7 @@ from fastapi.testclient import TestClient
 
 from app.main import app
 from app.schema import execute_read_only
+from app.sql import normalize_case_insensitive_text_comparisons
 
 
 client = TestClient(app)
@@ -84,3 +85,21 @@ def test_six_consecutive_queries_share_one_sqlite_dataset(tmp_path) -> None:
     assert results[0][1][0]["city"] == "Delhi"
     assert results[1][1][0]["customer_name"] == "Asha"
     assert results[2][1][0]["month"] == "2025-01"
+
+
+def test_text_comparisons_are_case_insensitive_without_lowering_non_text() -> None:
+    schema = [
+        {
+            "table": "bookings",
+            "columns": [
+                {"name": "gender", "type": "TEXT"},
+                {"name": "city", "type": "character varying"},
+                {"name": "fare", "type": "numeric"},
+            ],
+        }
+    ]
+    query = "SELECT * FROM bookings WHERE gender = 'male' AND city LIKE 'kol%' AND fare = 10"
+    normalized = normalize_case_insensitive_text_comparisons(query, schema)
+    assert "LOWER(gender) = LOWER('male')" in normalized
+    assert "city ILIKE 'kol%'" in normalized
+    assert "fare = 10" in normalized
