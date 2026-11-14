@@ -1,8 +1,11 @@
 from datetime import datetime, timezone
+import logging
+import time
 from pathlib import Path
 from typing import Any
+from uuid import uuid4
 
-from fastapi import FastAPI, File, Form, HTTPException, UploadFile
+from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 
 from .clarification import apply_answers, questions_for
@@ -16,6 +19,7 @@ from .store import Dataset, store
 from .results import interpret_result
 from .orchestration import understand_intent
 
+logger = logging.getLogger(__name__)
 app = FastAPI(title="QueryMind API", version="0.1.0")
 app.add_middleware(CORSMiddleware, allow_origins=[origin.strip() for origin in settings.cors_allowed_origins.split(",")], allow_credentials=True, allow_methods=["*"], allow_headers=["*"])
 
@@ -92,21 +96,34 @@ def create_conversation(connection_id: str) -> dict[str, str]:
 
 
 @app.post("/conversations/{conversation_id}/messages", response_model=QueryResponse)
-def send_message(conversation_id: str, payload: MessageRequest) -> QueryResponse:
+def send_message(request: Request, conversation_id: str, payload: MessageRequest) -> QueryResponse:
+    request_id = request.headers.get("x-request-id") or str(uuid4())
+    started = time.perf_counter()
+    def stage(name: str) -> None:
+        logger.info("query_stage request_id=%s stage=%s duration_ms=%.1f", request_id, name, (time.perf_counter() - started) * 1000)
+
     conversation = store.conversations.get(conversation_id)
     if not conversation:
         raise HTTPException(404, "Conversation not found")
     conversation.messages.append({"role": "user", "content": payload.content})
     connection = _connection(conversation.connection_id)
-    schema = discover_schema(connection["url"])
+    try:
+        schema = discover_schema(connection["url"])
+        stage("schema")
+    except Exception as error:
+        logger.exception("query_failed request_id=%s stage=schema", request_id)
+        raise HTTPException(503, f"Schema retrieval failed: {error}") from error
     try:
         intent = understand_intent(payload.content, schema, conversation.intent)
     except GeminiUnavailable as error:
+        logger.exception("query_failed request_id=%s stage=intent", request_id)
         raise HTTPException(503, str(error)) from error
+    stage("intent")
     conversation.intent = intent
     try:
         questions = questions_for(intent)
     except GeminiUnavailable as error:
+        logger.exception("query_failed request_id=%s stage=clarification", request_id)
         raise HTTPException(503, str(error)) from error
     now = datetime.now(timezone.utc)
     if questions:
@@ -115,30 +132,35 @@ def send_message(conversation_id: str, payload: MessageRequest) -> QueryResponse
     try:
         sql = generate_sql(intent, schema)
     except GeminiUnavailable as error:
+        logger.exception("query_failed request_id=%s stage=sql_generation", request_id)
         raise HTTPException(503, str(error)) from error
+    stage("sql_generation")
     valid, normalized, errors = validate_sql(sql, schema, settings.max_rows)
     if not valid or not normalized:
+        logger.warning("query_failed request_id=%s stage=sql_validation errors=%s", request_id, errors)
         raise HTTPException(422, {"errors": errors})
     try:
         columns, rows = execute_read_only(connection["url"], normalized, settings.max_rows)
     except Exception as error:
         store.add_query(conversation_id, payload.content, normalized, "failed")
+        logger.exception("query_failed request_id=%s stage=execution sql=%s", request_id, normalized)
+        if "timeout" in str(error).lower() or "locked" in str(error).lower():
+            raise HTTPException(504, f"Query execution timed out: {error}") from error
         raise HTTPException(422, f"Query execution failed: {error}") from error
+    stage("execution")
     store.add_query(conversation_id, payload.content, normalized, "success")
-    try:
-        explanation = interpret_result(normalized, rows, connection["name"])
-    except GeminiUnavailable as error:
-        raise HTTPException(503, str(error)) from error
+    explanation = interpret_result(normalized, rows, connection["name"])
+    stage("complete")
     return QueryResponse(status="completed", conversation_id=conversation_id, message="Query completed.", sql=normalized, columns=columns, rows=rows, explanation=explanation, created_at=now, dataset_name=connection["name"], validation_status="valid")
 
 
 @app.post("/conversations/{conversation_id}/clarifications", response_model=QueryResponse)
-def answer_clarification(conversation_id: str, answers: dict[str, str]) -> QueryResponse:
+def answer_clarification(request: Request, conversation_id: str, answers: dict[str, str]) -> QueryResponse:
     conversation = store.conversations.get(conversation_id)
     if not conversation:
         raise HTTPException(404, "Conversation not found")
     conversation.intent = apply_answers(conversation.intent or {}, answers)
-    return send_message(conversation_id, MessageRequest(content=conversation.intent.get("request", "")))
+    return send_message(request, conversation_id, MessageRequest(content=conversation.intent.get("request", "")))
 
 
 @app.post("/sql/validate", response_model=ValidationResponse)

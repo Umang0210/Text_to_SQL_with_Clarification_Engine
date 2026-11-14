@@ -6,6 +6,8 @@ class Settings(BaseSettings):
     database_url: str = "sqlite:///./querymind.db"
     max_rows: int = 500
     query_timeout_seconds: int = 10
+    gemini_timeout_seconds: int = 15
+    gemini_retries: int = 1
     upload_dir: str = "./data/uploads"
     max_upload_bytes: int = 50 * 1024 * 1024
     gemini_api_key: str = ""

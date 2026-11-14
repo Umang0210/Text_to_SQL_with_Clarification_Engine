@@ -12,8 +12,10 @@ type DashboardStats = { datasets: number; tables: number; records: number; total
 async function request(path: string, init?: RequestInit) {
   const controller = new AbortController();
   const timeout = window.setTimeout(() => controller.abort(), 30_000);
+  const headers = new Headers(init?.headers);
+  headers.set("x-request-id", crypto.randomUUID());
   try {
-    const response = await fetch(`${API}${path}`, { ...init, signal: controller.signal });
+    const response = await fetch(`${API}${path}`, { ...init, headers, signal: controller.signal });
     const body = await response.json().catch(() => ({ detail: "The server returned an invalid response." }));
     if (!response.ok) throw new Error(typeof body.detail === "string" ? body.detail : JSON.stringify(body.detail));
     return body;
