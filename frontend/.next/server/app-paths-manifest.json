@@ -1,13 +1,15 @@
 {
-  "/api/datasets/[id]/schema/route": "app/api/datasets/[id]/schema/route.js",
+  "/_not-found/page": "app/_not-found/page.js",
+  "/api/datasets/[id]/preview/route": "app/api/datasets/[id]/preview/route.js",
+  "/api/conversations/[id]/clarifications/route": "app/api/conversations/[id]/clarifications/route.js",
   "/api/conversations/route": "app/api/conversations/route.js",
   "/api/conversations/[id]/messages/route": "app/api/conversations/[id]/messages/route.js",
-  "/api/conversations/[id]/clarifications/route": "app/api/conversations/[id]/clarifications/route.js",
+  "/api/dashboard/route": "app/api/dashboard/route.js",
   "/api/datasets/route": "app/api/datasets/route.js",
   "/api/datasets/[id]/activate/route": "app/api/datasets/[id]/activate/route.js",
-  "/api/datasets/[id]/preview/route": "app/api/datasets/[id]/preview/route.js",
-  "/_not-found/page": "app/_not-found/page.js",
-  "/api/datasets/upload/route": "app/api/datasets/upload/route.js",
+  "/api/datasets/[id]/schema/route": "app/api/datasets/[id]/schema/route.js",
   "/api/health/route": "app/api/health/route.js",
+  "/api/queries/history/route": "app/api/queries/history/route.js",
+  "/api/datasets/upload/route": "app/api/datasets/upload/route.js",
   "/page": "app/page.js"
 }

@@ -96,6 +96,29 @@ export async function saveQuery(id: string, conversationId: string, request: str
   `;
 }
 
+export async function listQueries() {
+  await ensureDatabase();
+  return sql`SELECT id, conversation_id, request, generated_sql, status, created_at FROM querymind_queries ORDER BY created_at DESC LIMIT 100`;
+}
+
+export async function dashboardStats() {
+  await ensureDatabase();
+  const [datasets, queries, success, failures, rows] = await Promise.all([
+    sql`SELECT COUNT(*)::int AS count FROM querymind_datasets`,
+    sql`SELECT COUNT(*)::int AS count FROM querymind_queries`,
+    sql`SELECT COUNT(*)::int AS count FROM querymind_queries WHERE status = 'success'`,
+    sql`SELECT COUNT(*)::int AS count FROM querymind_queries WHERE status <> 'success'`,
+    sql`SELECT COALESCE(SUM((metadata->>'total_rows')::int), 0)::int AS count FROM querymind_datasets`,
+  ]);
+  return {
+    datasets: datasets[0]?.count ?? 0,
+    queries: queries[0]?.count ?? 0,
+    successfulQueries: success[0]?.count ?? 0,
+    failedQueries: failures[0]?.count ?? 0,
+    records: rows[0]?.count ?? 0,
+  };
+}
+
 export function quotedIdentifier(identifier: string) {
   return `"${identifier.replaceAll('"', '""')}"`;
 }

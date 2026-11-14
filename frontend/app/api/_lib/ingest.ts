@@ -133,7 +133,7 @@ export async function ingest(filename: string, buffer: Buffer): Promise<Dataset>
     preview.push(...normalized.rows.slice(0, 100));
   }
   if (!tables.length) throw new Error("The dataset contains no rows with usable columns.");
-  const dataset = { id: datasetId, connection_id: connectionId, name: filename.replace(/\.[^.]+$/, ""), filename, size_bytes: buffer.byteLength, uploaded_at: new Date().toISOString(), tables, preview: preview.slice(0, 100), duplicate_rows: 0, potential_primary_keys: keys };
+  const dataset = { id: datasetId, connection_id: connectionId, name: filename.replace(/\.[^.]+$/, ""), filename, size_bytes: buffer.byteLength, uploaded_at: new Date().toISOString(), tables, preview: preview.slice(0, 100), duplicate_rows: 0, potential_primary_keys: keys, total_rows: tables.reduce((total, table) => total + table.row_count, 0) };
   await sql`CREATE TABLE IF NOT EXISTS ${sql(quotedIdentifier(`qm_meta_${datasetId.replaceAll("-", "")}`))} (id text)`;
   return dataset;
 }
