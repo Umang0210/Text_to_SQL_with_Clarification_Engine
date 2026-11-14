@@ -108,15 +108,15 @@ export async function datasetPreview(id: string, table: string | undefined, page
   const [count] = await sql`
     SELECT COUNT(*)::int AS count FROM ${sql.unsafe(quotedIdentifier(selected.table))} ${searchTerms}
   `;
-  return { dataset, table: selected, columns: selected.columns.map((column) => column.name), rows, page, page_size: pageSize, total_rows: Number(count?.count ?? 0), total_pages: Math.ceil(Number(count?.count ?? 0) / pageSize) };
+  return { dataset, table: selected, columns: selected.columns, rows, page, page_size: pageSize, total_rows: Number(count?.count ?? 0), total_pages: Math.ceil(Number(count?.count ?? 0) / pageSize) };
 }
 
 export async function datasetDownload(id: string, tableNameValue?: string) {
   const result = await datasetPreview(id, tableNameValue, 1, 100_000, "", undefined, "asc");
   if (!result) return null;
   const escape = (value: unknown) => `"${String(value ?? "").replace(/"/g, '""')}"`;
-  const header = result.columns.map((column) => escape(column)).join(",");
-  const body = result.rows.map((row) => result.columns.map((column) => escape(row[column])).join(",")).join("\r\n");
+  const header = result.columns.map((column) => escape(column.display_name ?? column.name)).join(",");
+  const body = result.rows.map((row) => result.columns.map((column) => escape(row[column.name])).join(",")).join("\r\n");
   return { filename: `${result.dataset.name}-${result.table.table}.csv`, content: `${header}\r\n${body}\r\n` };
 }
 

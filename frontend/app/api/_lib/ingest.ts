@@ -27,6 +27,7 @@ function normalizeRows(rows: Record<string, unknown>[], headers?: unknown[]) {
   const columns = uniqueColumns(sourceHeaders);
   return {
     columns,
+    displayNames: sourceHeaders.map((header) => header || "Unnamed column"),
     rows: rows.map((row) => {
       return Object.fromEntries(columns.map((column, index) => [column, row[sourceHeaders[index]] ?? null]));
     }),
@@ -62,12 +63,15 @@ function rowsFromBuffer(filename: string, buffer: Buffer) {
   return workbook.SheetNames.map((name) => {
     const raw = XLSX.utils.sheet_to_json<unknown[]>(workbook.Sheets[name], { header: 1, defval: null });
     const headers = raw.shift() || [];
-    const columns = uniqueColumns(headers);
+    const sourceHeaders = headers.map((header, index) => {
+      const value = String(header ?? "").trim();
+      return value || `column_${index}`;
+    });
     return {
       name,
       rows: raw
         .filter((row) => row.some((value) => value !== null && value !== undefined && value !== ""))
-        .map((row) => Object.fromEntries(columns.map((column, index) => [column, row[index] ?? null]))),
+        .map((row) => Object.fromEntries(sourceHeaders.map((header, index) => [header, row[index] ?? null]))),
     };
   });
 }
@@ -129,7 +133,7 @@ export async function ingest(filename: string, buffer: Buffer): Promise<Dataset>
       }
       const count = normalized.rows.length;
       const candidates = columns.filter((column) => new Set(normalized.rows.map((row) => row[column])).size === count);
-      tables.push({ table: physical, source_name: source.name, columns: columns.map((name) => ({ name, type: inferType(normalized.rows.map((row) => row[name])) })), row_count: count });
+      tables.push({ table: physical, source_name: source.name, columns: columns.map((name, index) => ({ name, display_name: normalized.displayNames[index], type: inferType(normalized.rows.map((row) => row[name])) })), row_count: count });
       keys[physical] = candidates;
       preview.push(...normalized.rows.slice(0, 100));
     }

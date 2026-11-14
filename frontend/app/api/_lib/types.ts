@@ -1,7 +1,7 @@
 export type SchemaTable = {
   table: string;
   source_name?: string;
-  columns: { name: string; type: string }[];
+  columns: { name: string; display_name?: string; type: string }[];
   row_count: number;
 };
 
