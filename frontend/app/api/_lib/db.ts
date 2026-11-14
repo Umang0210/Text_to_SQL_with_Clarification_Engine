@@ -7,43 +7,56 @@ if (!connectionString && process.env.NODE_ENV === "production") {
 }
 
 export const sql = postgres(connectionString || "postgres://localhost/querymind", {
-  max: 1,
+  max: Number(process.env.DB_POOL_MAX ?? 5),
   prepare: false,
   connect_timeout: 10,
+  idle_timeout: 20,
+  max_lifetime: 60 * 30,
+  connection: { statement_timeout: 10_000 },
 });
 
+let databaseReady: Promise<void> | null = null;
+
 export async function ensureDatabase() {
-  await sql`
-    CREATE TABLE IF NOT EXISTS querymind_datasets (
-      id text PRIMARY KEY,
-      connection_id text NOT NULL,
-      name text NOT NULL,
-      filename text NOT NULL,
-      size_bytes integer NOT NULL,
-      uploaded_at timestamptz NOT NULL DEFAULT now(),
-      metadata jsonb NOT NULL,
-      table_names text[] NOT NULL
-    )
-  `;
-  await sql`
-    CREATE TABLE IF NOT EXISTS querymind_conversations (
-      id text PRIMARY KEY,
-      connection_id text NOT NULL,
-      intent jsonb,
-      created_at timestamptz NOT NULL DEFAULT now(),
-      updated_at timestamptz NOT NULL DEFAULT now()
-    )
-  `;
-  await sql`
-    CREATE TABLE IF NOT EXISTS querymind_queries (
-      id text PRIMARY KEY,
-      conversation_id text NOT NULL,
-      request text NOT NULL,
-      generated_sql text NOT NULL,
-      status text NOT NULL,
-      created_at timestamptz NOT NULL DEFAULT now()
-    )
-  `;
+  if (!databaseReady) {
+    databaseReady = sql.begin(async (transaction) => {
+      await transaction`
+        CREATE TABLE IF NOT EXISTS querymind_datasets (
+          id text PRIMARY KEY,
+          connection_id text NOT NULL,
+          name text NOT NULL,
+          filename text NOT NULL,
+          size_bytes integer NOT NULL,
+          uploaded_at timestamptz NOT NULL DEFAULT now(),
+          metadata jsonb NOT NULL,
+          table_names text[] NOT NULL
+        )
+      `;
+      await transaction`
+        CREATE TABLE IF NOT EXISTS querymind_conversations (
+          id text PRIMARY KEY,
+          connection_id text NOT NULL,
+          intent jsonb,
+          created_at timestamptz NOT NULL DEFAULT now(),
+          updated_at timestamptz NOT NULL DEFAULT now()
+        )
+      `;
+      await transaction`
+        CREATE TABLE IF NOT EXISTS querymind_queries (
+          id text PRIMARY KEY,
+          conversation_id text NOT NULL,
+          request text NOT NULL,
+          generated_sql text NOT NULL,
+          status text NOT NULL,
+          created_at timestamptz NOT NULL DEFAULT now()
+        )
+      `;
+    }).then(() => undefined).catch((error) => {
+      databaseReady = null;
+      throw error;
+    });
+  }
+  await databaseReady;
 }
 
 export async function getDataset(id: string): Promise<Dataset | null> {
@@ -103,20 +116,61 @@ export async function listQueries() {
 
 export async function dashboardStats() {
   await ensureDatabase();
-  const [datasets, queries, success, failures, rows] = await Promise.all([
-    sql`SELECT COUNT(*)::int AS count FROM querymind_datasets`,
-    sql`SELECT COUNT(*)::int AS count FROM querymind_queries`,
-    sql`SELECT COUNT(*)::int AS count FROM querymind_queries WHERE status = 'success'`,
-    sql`SELECT COUNT(*)::int AS count FROM querymind_queries WHERE status <> 'success'`,
-    sql`SELECT COALESCE(SUM((metadata->>'total_rows')::int), 0)::int AS count FROM querymind_datasets`,
-  ]);
+  const [metrics] = await sql`
+    WITH dataset_stats AS (
+      SELECT
+        COUNT(*)::int AS datasets,
+        COALESCE(SUM(jsonb_array_length(COALESCE(metadata->'tables', '[]'::jsonb))), 0)::int AS tables,
+        COALESCE(SUM(
+          CASE
+            WHEN metadata->>'total_rows' ~ '^[0-9]+$' THEN (metadata->>'total_rows')::bigint
+            ELSE (
+              SELECT COALESCE(SUM((table_item->>'row_count')::bigint), 0)
+              FROM jsonb_array_elements(COALESCE(metadata->'tables', '[]'::jsonb)) AS table_item
+            )
+          END
+        ), 0)::bigint AS records,
+        COALESCE(ROUND(AVG(size_bytes)), 0)::int AS average_dataset_size
+      FROM querymind_datasets
+    ),
+    query_stats AS (
+      SELECT
+        COUNT(*)::int AS queries,
+        COUNT(*) FILTER (WHERE status = 'success')::int AS successful_queries,
+        COUNT(*) FILTER (WHERE status <> 'success')::int AS failed_queries
+      FROM querymind_queries
+    ),
+    activity AS (
+      SELECT COALESCE(jsonb_agg(jsonb_build_object('date', query_date, 'count', query_count) ORDER BY query_date), '[]'::jsonb) AS query_activity
+      FROM (
+        SELECT created_at::date AS query_date, COUNT(*)::int AS query_count
+        FROM querymind_queries
+        WHERE created_at >= CURRENT_DATE - INTERVAL '13 days'
+        GROUP BY created_at::date
+      ) daily
+    )
+    SELECT dataset_stats.datasets, dataset_stats.tables, dataset_stats.records,
+      dataset_stats.average_dataset_size, query_stats.queries,
+      query_stats.successful_queries, query_stats.failed_queries, activity.query_activity
+    FROM dataset_stats CROSS JOIN query_stats CROSS JOIN activity
+  `;
   return {
-    datasets: datasets[0]?.count ?? 0,
-    queries: queries[0]?.count ?? 0,
-    successfulQueries: success[0]?.count ?? 0,
-    failedQueries: failures[0]?.count ?? 0,
-    records: rows[0]?.count ?? 0,
+    datasets: metrics?.datasets ?? 0,
+    tables: metrics?.tables ?? 0,
+    records: Number(metrics?.records ?? 0),
+    totalRecords: Number(metrics?.records ?? 0),
+    averageDatasetSize: metrics?.average_dataset_size ?? 0,
+    queries: metrics?.queries ?? 0,
+    successfulQueries: metrics?.successful_queries ?? 0,
+    failedQueries: metrics?.failed_queries ?? 0,
+    queryActivity: metrics?.query_activity ?? [],
   };
+}
+
+export async function databaseHealth() {
+  await ensureDatabase();
+  await sql`SELECT 1`;
+  return { configured: Boolean(connectionString), poolSize: Number(process.env.DB_POOL_MAX ?? 5) };
 }
 
 export function quotedIdentifier(identifier: string) {
