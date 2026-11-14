@@ -12,6 +12,43 @@ function safeColumn(value: unknown, index: number) {
   return name || `column_${index}`;
 }
 
+function uniqueColumns(values: unknown[]) {
+  const used = new Map<string, number>();
+  return values.map((value, index) => {
+    const base = safeColumn(value, index);
+    const occurrence = used.get(base) ?? 0;
+    used.set(base, occurrence + 1);
+    return occurrence ? `${base}_${occurrence + 1}` : base;
+  });
+}
+
+function normalizeRows(rows: Record<string, unknown>[], headers?: unknown[]) {
+  const sourceHeaders = headers?.map(String) ?? [...new Set(rows.flatMap((row) => Object.keys(row)))];
+  const columns = uniqueColumns(sourceHeaders);
+  return {
+    columns,
+    rows: rows.map((row) => {
+      return Object.fromEntries(columns.map((column, index) => [column, row[sourceHeaders[index]] ?? null]));
+    }),
+  };
+}
+
+function inferType(values: unknown[]) {
+  const present = values.filter((value) => value !== null && value !== undefined && value !== "");
+  if (!present.length) return "text";
+  if (present.every((value) => typeof value === "boolean")) return "boolean";
+  if (present.every((value) => typeof value === "number" && Number.isInteger(value))) return "bigint";
+  if (present.every((value) => typeof value === "number" || (typeof value === "string" && /^-?\d+(?:\.\d+)?$/.test(value)))) return "numeric";
+  if (present.every((value) => value instanceof Date)) return "timestamptz";
+  return "text";
+}
+
+function parameterValue(value: unknown): string | number | boolean | Date | null {
+  if (value === null || value === undefined || value === "") return null;
+  if (value instanceof Date || typeof value === "string" || typeof value === "number" || typeof value === "boolean") return value;
+  return String(value);
+}
+
 function rowsFromBuffer(filename: string, buffer: Buffer) {
   const extension = filename.slice(filename.lastIndexOf(".")).toLowerCase();
   if (extension === ".json") {
@@ -24,8 +61,14 @@ function rowsFromBuffer(filename: string, buffer: Buffer) {
   const workbook = XLSX.read(buffer, { type: "buffer", cellDates: true });
   return workbook.SheetNames.map((name) => {
     const raw = XLSX.utils.sheet_to_json<unknown[]>(workbook.Sheets[name], { header: 1, defval: null });
-    const headers = (raw.shift() || []).map(safeColumn);
-    return { name, rows: raw.filter((row) => row.some((value) => value !== null)).map((row) => Object.fromEntries(headers.map((header, index) => [header, row[index]]))) };
+    const headers = raw.shift() || [];
+    const columns = uniqueColumns(headers);
+    return {
+      name,
+      rows: raw
+        .filter((row) => row.some((value) => value !== null && value !== undefined && value !== ""))
+        .map((row) => Object.fromEntries(columns.map((column, index) => [column, row[index] ?? null]))),
+    };
   });
 }
 
@@ -55,25 +98,41 @@ export async function ingest(filename: string, buffer: Buffer): Promise<Dataset>
   const tables: SchemaTable[] = [];
   const preview: Record<string, unknown>[] = [];
   const keys: Record<string, string[]> = {};
+  const usedPhysicalNames = new Set<string>();
   for (const source of sources) {
     if (!source.rows.length) continue;
-    const columns = [...new Set(Object.keys(source.rows[0]).map((column, index) => safeColumn(column, index)))];
-    const physical = tableName(datasetId, source.name);
-    await sql`CREATE TABLE ${sql(quotedIdentifier(physical))} (${sql(columns.map((column) => `${quotedIdentifier(column)} text`).join(", "))})`;
-    for (const row of source.rows) {
-      const values = columns.map((column) => row[column]);
-      const placeholders = values.map((_, index) => `$${index + 1}`).join(", ");
-      await sql.unsafe(
-        `INSERT INTO ${quotedIdentifier(physical)} (${columns.map(quotedIdentifier).join(", ")}) VALUES (${placeholders})`,
-        values,
-      );
+    const normalized = normalizeRows(source.rows);
+    const columns = normalized.columns;
+    if (!columns.length) continue;
+    const basePhysical = tableName(datasetId, source.name);
+    let physical = basePhysical;
+    let suffix = 2;
+    while (usedPhysicalNames.has(physical)) physical = `${basePhysical}_${suffix++}`;
+    usedPhysicalNames.add(physical);
+    const definitions = columns.map((column, index) => `${quotedIdentifier(column)} ${inferType(normalized.rows.map((row) => row[column]))}`).join(", ");
+    const createStatement = `CREATE TABLE ${quotedIdentifier(physical)} (${definitions})`;
+    try {
+      await sql.unsafe(createStatement);
+    } catch (error) {
+      throw new Error(`Could not create imported table "${source.name}": ${error instanceof Error ? error.message : "database error"}`);
     }
-    const count = source.rows.length;
-    const candidates = columns.filter((column) => new Set(source.rows.map((row) => row[column])).size === count);
-    tables.push({ table: physical, columns: columns.map((name) => ({ name, type: "text" })), row_count: count });
+    for (const row of normalized.rows) {
+      const values = columns.map((column) => parameterValue(row[column]));
+      const placeholders = values.map((_, index) => `$${index + 1}`).join(", ");
+      const insertStatement = `INSERT INTO ${quotedIdentifier(physical)} (${columns.map(quotedIdentifier).join(", ")}) VALUES (${placeholders})`;
+      try {
+        await sql.unsafe(insertStatement, values);
+      } catch (error) {
+        throw new Error(`Could not import records into "${source.name}": ${error instanceof Error ? error.message : "database error"}`);
+      }
+    }
+    const count = normalized.rows.length;
+    const candidates = columns.filter((column) => new Set(normalized.rows.map((row) => row[column])).size === count);
+    tables.push({ table: physical, columns: columns.map((name, index) => ({ name, type: inferType(normalized.rows.map((row) => row[name])) })), row_count: count });
     keys[physical] = candidates;
-    preview.push(...source.rows.slice(0, 100));
+    preview.push(...normalized.rows.slice(0, 100));
   }
+  if (!tables.length) throw new Error("The dataset contains no rows with usable columns.");
   const dataset = { id: datasetId, connection_id: connectionId, name: filename.replace(/\.[^.]+$/, ""), filename, size_bytes: buffer.byteLength, uploaded_at: new Date().toISOString(), tables, preview: preview.slice(0, 100), duplicate_rows: 0, potential_primary_keys: keys };
   await sql`CREATE TABLE IF NOT EXISTS ${sql(quotedIdentifier(`qm_meta_${datasetId.replaceAll("-", "")}`))} (id text)`;
   return dataset;
