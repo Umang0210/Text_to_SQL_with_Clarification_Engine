@@ -15,6 +15,14 @@ export const sql = postgres(connectionString || "postgres://localhost/querymind"
   connection: { statement_timeout: 10_000 },
 });
 
+export function databaseErrorDetails(error: unknown) {
+  const value = error && typeof error === "object" ? error as { code?: string; detail?: string; message?: string } : {};
+  return {
+    code: value.code,
+    detail: String(value.detail ?? value.message ?? "Unknown PostgreSQL error").replace(/postgres(?:ql)?:\/\/[^\s]+/gi, "[redacted connection]"),
+  };
+}
+
 let databaseReady: Promise<void> | null = null;
 
 export async function ensureDatabase() {
@@ -51,6 +59,10 @@ export async function ensureDatabase() {
           created_at timestamptz NOT NULL DEFAULT now()
         )
       `;
+      await transaction`ALTER TABLE querymind_datasets ADD COLUMN IF NOT EXISTS metadata jsonb`;
+      await transaction`ALTER TABLE querymind_datasets ADD COLUMN IF NOT EXISTS table_names text[]`;
+      await transaction`ALTER TABLE querymind_conversations ADD COLUMN IF NOT EXISTS intent jsonb`;
+      await transaction`ALTER TABLE querymind_queries ADD COLUMN IF NOT EXISTS status text`;
     }).then(() => undefined).catch((error) => {
       databaseReady = null;
       throw error;
@@ -120,13 +132,23 @@ export async function dashboardStats() {
     WITH dataset_stats AS (
       SELECT
         COUNT(*)::int AS datasets,
-        COALESCE(SUM(jsonb_array_length(COALESCE(metadata->'tables', '[]'::jsonb))), 0)::int AS tables,
+        COALESCE(SUM(
+          CASE WHEN jsonb_typeof(metadata->'tables') = 'array'
+            THEN jsonb_array_length(metadata->'tables')
+            ELSE 0
+          END
+        ), 0)::int AS tables,
         COALESCE(SUM(
           CASE
             WHEN metadata->>'total_rows' ~ '^[0-9]+$' THEN (metadata->>'total_rows')::bigint
             ELSE (
               SELECT COALESCE(SUM((table_item->>'row_count')::bigint), 0)
-              FROM jsonb_array_elements(COALESCE(metadata->'tables', '[]'::jsonb)) AS table_item
+              FROM jsonb_array_elements(
+                CASE WHEN jsonb_typeof(metadata->'tables') = 'array'
+                  THEN metadata->'tables'
+                  ELSE '[]'::jsonb
+                END
+              ) AS table_item
             )
           END
         ), 0)::bigint AS records,

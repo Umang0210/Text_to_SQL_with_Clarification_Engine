@@ -1,7 +1,7 @@
 import * as XLSX from "xlsx";
 import initSqlJs from "sql.js";
 import path from "node:path";
-import { quotedIdentifier, sql, tableName } from "./db";
+import { databaseErrorDetails, ensureDatabase, quotedIdentifier, sql, tableName } from "./db";
 import type { Dataset, SchemaTable } from "./types";
 
 const allowed = new Set([".csv", ".xlsx", ".xls", ".json", ".db", ".sqlite", ".sqlite3"]);
@@ -39,7 +39,7 @@ function inferType(values: unknown[]) {
   if (present.every((value) => typeof value === "boolean")) return "boolean";
   if (present.every((value) => typeof value === "number" && Number.isInteger(value))) return "bigint";
   if (present.every((value) => typeof value === "number" || (typeof value === "string" && /^-?\d+(?:\.\d+)?$/.test(value)))) return "numeric";
-  if (present.every((value) => value instanceof Date)) return "timestamptz";
+  if (present.every((value) => value instanceof Date || (typeof value === "string" && !Number.isNaN(Date.parse(value))))) return "timestamptz";
   return "text";
 }
 
@@ -95,45 +95,48 @@ export async function ingest(filename: string, buffer: Buffer): Promise<Dataset>
   const datasetId = crypto.randomUUID();
   const connectionId = crypto.randomUUID();
   const sources = await rowsFromBuffer(filename, buffer);
-  const tables: SchemaTable[] = [];
-  const preview: Record<string, unknown>[] = [];
-  const keys: Record<string, string[]> = {};
-  const usedPhysicalNames = new Set<string>();
-  for (const source of sources) {
-    if (!source.rows.length) continue;
-    const normalized = normalizeRows(source.rows);
-    const columns = normalized.columns;
-    if (!columns.length) continue;
-    const basePhysical = tableName(datasetId, source.name);
-    let physical = basePhysical;
-    let suffix = 2;
-    while (usedPhysicalNames.has(physical)) physical = `${basePhysical}_${suffix++}`;
-    usedPhysicalNames.add(physical);
-    const definitions = columns.map((column, index) => `${quotedIdentifier(column)} ${inferType(normalized.rows.map((row) => row[column]))}`).join(", ");
-    const createStatement = `CREATE TABLE ${quotedIdentifier(physical)} (${definitions})`;
-    try {
-      await sql.unsafe(createStatement);
-    } catch (error) {
-      throw new Error(`Could not create imported table "${source.name}": ${error instanceof Error ? error.message : "database error"}`);
-    }
-    for (const row of normalized.rows) {
-      const values = columns.map((column) => parameterValue(row[column]));
-      const placeholders = values.map((_, index) => `$${index + 1}`).join(", ");
-      const insertStatement = `INSERT INTO ${quotedIdentifier(physical)} (${columns.map(quotedIdentifier).join(", ")}) VALUES (${placeholders})`;
+  await ensureDatabase();
+  return sql.begin(async (transaction) => {
+    const tables: SchemaTable[] = [];
+    const preview: Record<string, unknown>[] = [];
+    const keys: Record<string, string[]> = {};
+    const usedPhysicalNames = new Set<string>();
+    for (const source of sources) {
+      if (!source.rows.length) continue;
+      const normalized = normalizeRows(source.rows);
+      const columns = normalized.columns;
+      if (!columns.length) continue;
+      const basePhysical = tableName(datasetId, source.name);
+      let physical = basePhysical;
+      let suffix = 2;
+      while (usedPhysicalNames.has(physical)) physical = `${basePhysical}_${suffix++}`;
+      usedPhysicalNames.add(physical);
+      const definitions = columns.map((column) => `${quotedIdentifier(column)} ${inferType(normalized.rows.map((row) => row[column]))}`).join(", ");
       try {
-        await sql.unsafe(insertStatement, values);
+        await transaction.unsafe(`CREATE TABLE ${quotedIdentifier(physical)} (${definitions})`);
+        for (const row of normalized.rows) {
+          const values = columns.map((column) => parameterValue(row[column]));
+          const placeholders = values.map((_, index) => `$${index + 1}`).join(", ");
+          const insertStatement = `INSERT INTO ${quotedIdentifier(physical)} (${columns.map(quotedIdentifier).join(", ")}) VALUES (${placeholders})`;
+          await transaction.unsafe(insertStatement, values);
+        }
       } catch (error) {
-        throw new Error(`Could not import records into "${source.name}": ${error instanceof Error ? error.message : "database error"}`);
+        const details = databaseErrorDetails(error);
+        console.error("dataset_import_table_failed", { datasetId, sourceName: source.name, physicalTable: physical, ...details });
+        throw new Error(`Could not import sheet "${source.name}" into PostgreSQL${details.code ? ` (${details.code})` : ""}: ${details.detail}`);
       }
+      const count = normalized.rows.length;
+      const candidates = columns.filter((column) => new Set(normalized.rows.map((row) => row[column])).size === count);
+      tables.push({ table: physical, source_name: source.name, columns: columns.map((name) => ({ name, type: inferType(normalized.rows.map((row) => row[name])) })), row_count: count });
+      keys[physical] = candidates;
+      preview.push(...normalized.rows.slice(0, 100));
     }
-    const count = normalized.rows.length;
-    const candidates = columns.filter((column) => new Set(normalized.rows.map((row) => row[column])).size === count);
-    tables.push({ table: physical, columns: columns.map((name, index) => ({ name, type: inferType(normalized.rows.map((row) => row[name])) })), row_count: count });
-    keys[physical] = candidates;
-    preview.push(...normalized.rows.slice(0, 100));
-  }
-  if (!tables.length) throw new Error("The dataset contains no rows with usable columns.");
-  const dataset = { id: datasetId, connection_id: connectionId, name: filename.replace(/\.[^.]+$/, ""), filename, size_bytes: buffer.byteLength, uploaded_at: new Date().toISOString(), tables, preview: preview.slice(0, 100), duplicate_rows: 0, potential_primary_keys: keys, total_rows: tables.reduce((total, table) => total + table.row_count, 0) };
-  await sql`CREATE TABLE IF NOT EXISTS ${sql(quotedIdentifier(`qm_meta_${datasetId.replaceAll("-", "")}`))} (id text)`;
-  return dataset;
+    if (!tables.length) throw new Error("The dataset contains no rows with usable columns.");
+    const dataset = { id: datasetId, connection_id: connectionId, name: filename.replace(/\.[^.]+$/, ""), filename, size_bytes: buffer.byteLength, uploaded_at: new Date().toISOString(), tables, preview: preview.slice(0, 100), duplicate_rows: 0, potential_primary_keys: keys, total_rows: tables.reduce((total, table) => total + table.row_count, 0) };
+    await transaction`
+      INSERT INTO querymind_datasets (id, connection_id, name, filename, size_bytes, metadata, table_names)
+      VALUES (${dataset.id}, ${dataset.connection_id}, ${dataset.name}, ${dataset.filename}, ${dataset.size_bytes}, ${sql.json(JSON.parse(JSON.stringify(dataset)))}, ${tables.map((table) => table.table)})
+    `;
+    return dataset;
+  });
 }
