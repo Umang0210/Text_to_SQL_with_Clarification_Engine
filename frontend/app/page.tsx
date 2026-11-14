@@ -51,7 +51,7 @@ export default function Home() {
     setError("");
     const allowed = [".csv", ".xlsx", ".xls", ".json", ".db", ".sqlite", ".sqlite3"];
     if (!allowed.some((extension) => file.name.toLowerCase().endsWith(extension))) { setError("Choose a CSV, Excel, JSON, or SQLite file."); return; }
-    if (file.size > 50 * 1024 * 1024) { setError("Files must be 50 MB or smaller."); return; }
+    if (file.size > 4 * 1024 * 1024) { setError("Vercel API uploads must be 4 MB or smaller."); return; }
     setUploading(true);
     try {
       const form = new FormData();

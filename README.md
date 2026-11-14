@@ -57,6 +57,21 @@ Without a key, the deterministic local intent/SQL path remains available for dev
 
 ## Vercel deployment
 
-The Next.js app lives in `frontend/` and the FastAPI serverless entrypoint is `api/index.py`. The root [`vercel.json`](./vercel.json) builds the frontend while Vercel discovers the Python function. Set the Vercel project **Root Directory** to the repository root (`.`), not `frontend`, so both runtimes are included. `NEXT_PUBLIC_API_URL=/api` keeps browser requests same-origin.
+The Next.js app and all QueryMind API routes live under `frontend/`. Set the Vercel project **Root Directory** to `frontend`. From that configured root, use `npm install` and `npm run build`; do not prefix commands with `frontend/`. `NEXT_PUBLIC_API_URL=/api` keeps browser requests same-origin.
 
-Vercel functions are stateless and ephemeral. The current ingestion implementation uses local SQLite files for development; for production persistence, configure an external PostgreSQL-compatible database and persistent object storage before treating uploaded datasets as durable. Do not rely on Vercel `/tmp` across invocations.
+The API uses Vercel Node.js route handlers under `frontend/app/api/`. Vercel functions are stateless, so uploaded dataset tables and metadata are stored in the external PostgreSQL database configured by `DATABASE_URL`. Uploaded SQLite files are read in memory and imported into PostgreSQL; no Vercel filesystem data is treated as durable. Object storage is not required by the current import path because the queryable data is persisted as PostgreSQL tables.
+
+### Production environment variables
+
+Configure these in Vercel for **Production, Preview, and Development** as appropriate:
+
+```text
+DATABASE_URL=your-Vercel-Postgres-or-Neon-connection-string
+GEMINI_API_KEY=your-server-only-Gemini-key
+GEMINI_MODEL=gemini-2.5-flash
+NEXT_PUBLIC_API_URL=/api
+```
+
+`GEMINI_API_KEY` is read only in server route modules and is never exposed to the browser. The current PostgreSQL schema is created automatically on first request. The database user needs permission to create tables and insert/select data.
+
+Vercel serverless request bodies are limited, so the direct upload route accepts files up to 4 MB. For larger datasets, add direct browser-to-object-storage uploads and an asynchronous import worker; do not increase the route limit beyond the platform request limit.
