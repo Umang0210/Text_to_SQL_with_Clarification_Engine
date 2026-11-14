@@ -3,7 +3,7 @@ import type { Intent, SchemaTable } from "./types";
 
 const key = process.env.GEMINI_API_KEY;
 const model = process.env.GEMINI_MODEL || "gemini-2.5-flash";
-const aiTimeoutMs = Number(process.env.GEMINI_TIMEOUT_MS ?? 10000);
+const aiTimeoutMs = Number(process.env.GEMINI_TIMEOUT_MS ?? 7000);
 const aiRetries = Number(process.env.GEMINI_RETRIES ?? 1);
 const client = key ? new GoogleGenAI({ apiKey: key, httpOptions: { timeout: aiTimeoutMs } }) : null;
 
@@ -26,12 +26,14 @@ async function jsonPrompt(instruction: string, context: unknown, timeoutMs = aiT
       if (!text) throw new Error("Gemini returned an empty response.");
       return JSON.parse(text) as Record<string, unknown>;
     } catch (error) {
+      const message = error instanceof Error ? error.message : "Unknown Gemini error";
       console.error("gemini_request_failed", {
         requestId,
         attempt: attempt + 1,
         durationMs: Date.now() - started,
-        message: error instanceof Error ? error.message : "Unknown Gemini error",
+        message,
       });
+      if (/timeout|timed out/i.test(message)) throw new AIUnavailableError(message);
       if (attempt === aiRetries) throw new AIUnavailableError(error instanceof Error ? error.message : "Gemini request failed.");
       await new Promise((resolve) => setTimeout(resolve, 300 * (attempt + 1)));
     }

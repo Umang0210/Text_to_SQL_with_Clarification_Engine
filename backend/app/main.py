@@ -99,14 +99,20 @@ def create_conversation(connection_id: str) -> dict[str, str]:
 def send_message(request: Request, conversation_id: str, payload: MessageRequest) -> QueryResponse:
     request_id = request.headers.get("x-request-id") or str(uuid4())
     started = time.perf_counter()
+    deadline = started + settings.query_deadline_seconds
     def stage(name: str) -> None:
         logger.info("query_stage request_id=%s stage=%s duration_ms=%.1f", request_id, name, (time.perf_counter() - started) * 1000)
+    def check_deadline(name: str) -> None:
+        if time.perf_counter() >= deadline:
+            logger.error("query_deadline_exceeded request_id=%s stage=%s", request_id, name)
+            raise HTTPException(504, f"Query deadline expired during {name}.")
 
     conversation = store.conversations.get(conversation_id)
     if not conversation:
         raise HTTPException(404, "Conversation not found")
     conversation.messages.append({"role": "user", "content": payload.content})
     connection = _connection(conversation.connection_id)
+    check_deadline("schema")
     try:
         schema = discover_schema(connection["url"])
         stage("schema")
@@ -120,6 +126,7 @@ def send_message(request: Request, conversation_id: str, payload: MessageRequest
         raise HTTPException(503, str(error)) from error
     stage("intent")
     conversation.intent = intent
+    check_deadline("clarification")
     try:
         questions = questions_for(intent)
     except GeminiUnavailable as error:
@@ -135,6 +142,7 @@ def send_message(request: Request, conversation_id: str, payload: MessageRequest
         logger.exception("query_failed request_id=%s stage=sql_generation", request_id)
         raise HTTPException(503, str(error)) from error
     stage("sql_generation")
+    check_deadline("validation")
     valid, normalized, errors = validate_sql(sql, schema, settings.max_rows)
     if not valid or not normalized:
         logger.warning("query_failed request_id=%s stage=sql_validation errors=%s", request_id, errors)
@@ -149,7 +157,10 @@ def send_message(request: Request, conversation_id: str, payload: MessageRequest
         raise HTTPException(422, f"Query execution failed: {error}") from error
     stage("execution")
     store.add_query(conversation_id, payload.content, normalized, "success")
-    explanation = interpret_result(normalized, rows, connection["name"])
+    if (deadline - time.perf_counter()) < settings.gemini_timeout_seconds:
+        explanation = f"Returned {len(rows)} row(s) from {connection['name']}."
+    else:
+        explanation = interpret_result(normalized, rows[:50], connection["name"])
     stage("complete")
     return QueryResponse(status="completed", conversation_id=conversation_id, message="Query completed.", sql=normalized, columns=columns, rows=rows, explanation=explanation, created_at=now, dataset_name=connection["name"], validation_status="valid")
 

@@ -2,6 +2,31 @@ import { NextResponse } from "next/server";
 import { clarify, explain, generateSql, understandIntent } from "./ai";
 import { getConversation, getDatasetByConnection, saveConversation, saveQuery, sql } from "./db";
 
+const queryDeadlineMs = Number(process.env.QUERY_DEADLINE_MS ?? 25_000);
+
+class QueryDeadlineError extends Error {
+  constructor(stage: string) {
+    super(`Query deadline expired during ${stage}.`);
+    this.name = "QueryDeadlineError";
+  }
+}
+
+async function runStage<T>(stage: string, operation: () => Promise<T>, deadline: number) {
+  const remaining = deadline - Date.now();
+  if (remaining <= 0) throw new QueryDeadlineError(stage);
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      operation(),
+      new Promise<never>((_, reject) => {
+        timer = setTimeout(() => reject(new QueryDeadlineError(stage)), remaining);
+      }),
+    ]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
+
 function validateQuery(query: string, dataset: Awaited<ReturnType<typeof getDatasetByConnection>>) {
   const normalized = query.trim().replace(/;+\s*$/, "");
   if (!/^select\b/i.test(normalized) || /\b(insert|update|delete|drop|alter|truncate|grant|revoke)\b/i.test(normalized)) throw new Error("Only read-only SELECT queries are allowed.");
@@ -14,32 +39,33 @@ function validateQuery(query: string, dataset: Awaited<ReturnType<typeof getData
 
 export async function processMessage(id: string, content: string, requestId = crypto.randomUUID()) {
   const started = Date.now();
+  const deadline = started + queryDeadlineMs;
   const stage = (name: string) => console.info("query_stage", { requestId, stage: name, durationMs: Date.now() - started });
-  const conversation = await getConversation(id);
+  const conversation = await runStage("conversation lookup", () => getConversation(id), deadline);
   if (!conversation) return NextResponse.json({ detail: "Conversation not found." }, { status: 404 });
-  const dataset = await getDatasetByConnection(conversation.connection_id);
+  const dataset = await runStage("dataset lookup", () => getDatasetByConnection(conversation.connection_id), deadline);
   if (!dataset) return NextResponse.json({ detail: "Dataset not found." }, { status: 404 });
-  const intent = { ...(await understandIntent(content, dataset.tables, conversation.intent, requestId)), request: content };
+  const intent = { ...(await runStage("intent generation", () => understandIntent(content, dataset.tables, conversation.intent, requestId), deadline)), request: content };
   stage("intent");
-  await saveConversation(id, conversation.connection_id, intent);
+  await runStage("conversation persistence", () => saveConversation(id, conversation.connection_id, intent), deadline);
   const missing = Array.isArray(intent.missing_information) ? intent.missing_information : [];
-  if (missing.length) return NextResponse.json({ status: "clarification_required", conversation_id: id, message: "I found a specific ambiguity that changes the result.", questions: await clarify(intent, dataset.tables, requestId), dataset_name: dataset.name });
-  const generated = await generateSql(intent, dataset.tables, requestId);
+  if (missing.length) return NextResponse.json({ status: "clarification_required", conversation_id: id, message: "I found a specific ambiguity that changes the result.", questions: await runStage("clarification generation", () => clarify(intent, dataset.tables, requestId), deadline), dataset_name: dataset.name });
+  const generated = await runStage("SQL generation", () => generateSql(intent, dataset.tables, requestId), deadline);
   stage("sql_generation");
   const query = validateQuery(generated, dataset);
   let rows;
   try {
-    rows = await sql.unsafe(query);
+    rows = await runStage("PostgreSQL execution", () => sql.unsafe(query), deadline);
     stage("execution");
   } catch (error) {
     console.error("query_execution_failed", { requestId, query, durationMs: Date.now() - started, message: error instanceof Error ? error.message : "Unknown database error" });
     try { await saveQuery(crypto.randomUUID(), id, content, query, "failed"); } catch (historyError) { console.error("query_history_failed", { requestId, message: historyError instanceof Error ? historyError.message : "Unknown history error" }); }
     throw new Error(`Database query failed: ${error instanceof Error ? error.message : "Unknown database error"}`);
   }
-  await saveQuery(crypto.randomUUID(), id, content, query, "success");
+  await runStage("query history persistence", () => saveQuery(crypto.randomUUID(), id, content, query, "success"), deadline);
   let explanation = `Returned ${rows.length} row(s) from ${dataset.name}.`;
   try {
-    explanation = await explain(query, rows as Record<string, unknown>[], dataset.name, requestId);
+    explanation = await runStage("result explanation", () => explain(query, (rows as Record<string, unknown>[]).slice(0, 50), dataset.name, requestId), deadline);
   } catch (error) {
     console.error("query_explanation_failed", { requestId, message: error instanceof Error ? error.message : "Unknown explanation error" });
   }

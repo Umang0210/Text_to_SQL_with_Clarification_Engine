@@ -114,10 +114,12 @@ export async function ingest(filename: string, buffer: Buffer): Promise<Dataset>
       const definitions = columns.map((column) => `${quotedIdentifier(column)} ${inferType(normalized.rows.map((row) => row[column]))}`).join(", ");
       try {
         await transaction.unsafe(`CREATE TABLE ${quotedIdentifier(physical)} (${definitions})`);
-        for (const row of normalized.rows) {
-          const values = columns.map((column) => parameterValue(row[column]));
-          const placeholders = values.map((_, index) => `$${index + 1}`).join(", ");
-          const insertStatement = `INSERT INTO ${quotedIdentifier(physical)} (${columns.map(quotedIdentifier).join(", ")}) VALUES (${placeholders})`;
+        const batchSize = 250;
+        for (let offset = 0; offset < normalized.rows.length; offset += batchSize) {
+          const batch = normalized.rows.slice(offset, offset + batchSize);
+          const values = batch.flatMap((row) => columns.map((column) => parameterValue(row[column])));
+          const placeholders = batch.map((_, rowIndex) => `(${columns.map((__, columnIndex) => `$${rowIndex * columns.length + columnIndex + 1}`).join(", ")})`).join(", ");
+          const insertStatement = `INSERT INTO ${quotedIdentifier(physical)} (${columns.map(quotedIdentifier).join(", ")}) VALUES ${placeholders}`;
           await transaction.unsafe(insertStatement, values);
         }
       } catch (error) {

@@ -2,7 +2,7 @@ import { NextResponse } from "next/server";
 import { processMessage } from "../../../_lib/query";
 
 export const runtime = "nodejs";
-export const maxDuration = 60;
+export const maxDuration = 30;
 
 export async function POST(request: Request, context: { params: Promise<{ id: string }> }) {
   const requestId = request.headers.get("x-request-id") ?? crypto.randomUUID();

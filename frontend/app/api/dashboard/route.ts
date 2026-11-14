@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 import { dashboardStats, databaseErrorDetails } from "../_lib/db";
 
 export const runtime = "nodejs";
+export const maxDuration = 15;
 
 export async function GET() {
   try {
