@@ -75,3 +75,13 @@ NEXT_PUBLIC_API_URL=/api
 `GEMINI_API_KEY` is read only in server route modules and is never exposed to the browser. The current PostgreSQL schema is created automatically on first request. The database user needs permission to create tables and insert/select data.
 
 Vercel serverless request bodies are limited, so the direct upload route accepts files up to 4 MB. For larger datasets, add direct browser-to-object-storage uploads and an asynchronous import worker; do not increase the route limit beyond the platform request limit.
+
+Dataset management is backed by PostgreSQL through these same-origin routes:
+
+- `GET /api/datasets/[id]/preview` provides paginated, searchable, sortable records.
+- `GET /api/datasets/[id]/download` exports a selected dataset table as CSV.
+- `GET /api/datasets/[id]/insights` returns live column-level counts and null statistics.
+- `PATCH /api/datasets/[id]/rename` updates dataset metadata without changing physical tables.
+- `DELETE /api/datasets/[id]` drops only the dataset-owned tables and associated metadata in one transaction.
+
+The database role must also have permission to create and drop imported tables. Dataset deletion is intentionally explicit in the UI and requires confirmation.

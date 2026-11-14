@@ -78,6 +78,86 @@ export async function getDataset(id: string): Promise<Dataset | null> {
   return rows[0].metadata as Dataset;
 }
 
+function datasetTable(dataset: Dataset, table: string) {
+  const found = dataset.tables.find((item) => item.table === table);
+  if (!found) throw new Error("Table does not belong to this dataset.");
+  return found;
+}
+
+export async function datasetPreview(id: string, table: string | undefined, page: number, pageSize: number, search: string, sort: string | undefined, direction: "asc" | "desc") {
+  const dataset = await getDataset(id);
+  if (!dataset) return null;
+  const selected = datasetTable(dataset, table ?? dataset.tables[0]?.table);
+  const offset = (page - 1) * pageSize;
+  const searchValue = `%${search}%`;
+  const searchCondition = sql.unsafe(
+    selected.columns
+      .map((column) => `CAST(${quotedIdentifier(column.name)} AS text) ILIKE $1`)
+      .join(" OR "),
+    [searchValue],
+  );
+  const searchTerms = search ? sql`WHERE ${searchCondition}` : sql``;
+  const sortColumn = selected.columns.some((column) => column.name === sort) ? sort : selected.columns[0]?.name;
+  const order = direction === "desc" ? sql`DESC` : sql`ASC`;
+  const rows = await sql`
+    SELECT * FROM ${sql.unsafe(quotedIdentifier(selected.table))}
+    ${searchTerms}
+    ORDER BY ${sql.unsafe(quotedIdentifier(sortColumn ?? "id"))} ${order}
+    LIMIT ${pageSize} OFFSET ${offset}
+  `;
+  const [count] = await sql`
+    SELECT COUNT(*)::int AS count FROM ${sql.unsafe(quotedIdentifier(selected.table))} ${searchTerms}
+  `;
+  return { dataset, table: selected, columns: selected.columns.map((column) => column.name), rows, page, page_size: pageSize, total_rows: Number(count?.count ?? 0), total_pages: Math.ceil(Number(count?.count ?? 0) / pageSize) };
+}
+
+export async function datasetDownload(id: string, tableNameValue?: string) {
+  const result = await datasetPreview(id, tableNameValue, 1, 100_000, "", undefined, "asc");
+  if (!result) return null;
+  const escape = (value: unknown) => `"${String(value ?? "").replace(/"/g, '""')}"`;
+  const header = result.columns.map((column) => escape(column)).join(",");
+  const body = result.rows.map((row) => result.columns.map((column) => escape(row[column])).join(",")).join("\r\n");
+  return { filename: `${result.dataset.name}-${result.table.table}.csv`, content: `${header}\r\n${body}\r\n` };
+}
+
+export async function datasetInsights(id: string, tableNameValue?: string) {
+  const dataset = await getDataset(id);
+  if (!dataset) return null;
+  const selected = datasetTable(dataset, tableNameValue ?? dataset.tables[0]?.table);
+  const columns = await Promise.all(selected.columns.map(async (column) => {
+    const identifier = sql.unsafe(quotedIdentifier(column.name));
+    const [stats] = await sql`
+      SELECT COUNT(*)::int AS total_values,
+        COUNT(*) FILTER (WHERE ${identifier} IS NULL)::int AS null_count,
+        COUNT(DISTINCT ${identifier})::int AS unique_values
+      FROM ${sql.unsafe(quotedIdentifier(selected.table))}
+    `;
+    return { name: column.name, type: column.type, total_values: stats?.total_values ?? 0, null_count: stats?.null_count ?? 0, unique_values: stats?.unique_values ?? 0 };
+  }));
+  return { dataset, table: selected, total_rows: selected.row_count, columns };
+}
+
+export async function renameDataset(id: string, name: string) {
+  await ensureDatabase();
+  const rows = await sql`SELECT metadata FROM querymind_datasets WHERE id = ${id}`;
+  if (!rows[0]) return null;
+  const metadata = { ...(rows[0].metadata as Dataset), name };
+  await sql`UPDATE querymind_datasets SET name = ${name}, metadata = ${sql.json(JSON.parse(JSON.stringify(metadata)))} WHERE id = ${id}`;
+  return metadata;
+}
+
+export async function deleteDataset(id: string) {
+  await ensureDatabase();
+  const rows = await sql`SELECT table_names, connection_id FROM querymind_datasets WHERE id = ${id}`;
+  if (!rows[0]) return false;
+  await sql.begin(async (transaction) => {
+    for (const table of rows[0].table_names as string[]) await transaction.unsafe(`DROP TABLE IF EXISTS ${quotedIdentifier(table)}`);
+    await transaction`DELETE FROM querymind_datasets WHERE id = ${id}`;
+    await transaction`DELETE FROM querymind_conversations WHERE connection_id = ${rows[0].connection_id}`;
+  });
+  return true;
+}
+
 export async function getDatasetByConnection(connectionId: string): Promise<Dataset | null> {
   await ensureDatabase();
   const rows = await sql`SELECT * FROM querymind_datasets WHERE connection_id = ${connectionId}`;

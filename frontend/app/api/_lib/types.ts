@@ -16,6 +16,7 @@ export type Dataset = {
   preview: Record<string, unknown>[];
   duplicate_rows: number;
   potential_primary_keys: Record<string, string[]>;
+  total_rows?: number;
 };
 
 export type Intent = {
